@@ -11,6 +11,9 @@
 (define-constant err-insufficient-tokens (err u106))
 (define-constant err-story-exists (err u107))
 (define-constant err-invalid-branch (err u108))
+(define-constant err-invalid-rating (err u109))
+(define-constant err-already-rated (err u110))
+(define-constant err-self-rating (err u111))
 
 (define-data-var story-id-nonce uint u0)
 (define-data-var proposal-id-nonce uint u0)
@@ -65,6 +68,21 @@
   (list 20 principal)
 )
 
+(define-map story-ratings
+  { story-id: uint, rater: principal }
+  { rating: uint, timestamp: uint }
+)
+
+(define-map story-rating-summary
+  uint
+  { total-rating: uint, rating-count: uint, average-rating: uint }
+)
+
+(define-map author-reputation
+  principal
+  { total-score: uint, story-count: uint, reputation-score: uint }
+)
+
 (define-private (get-governance-balance (user principal))
   (default-to u0 (map-get? user-governance-balance user))
 )
@@ -108,6 +126,26 @@
       (err u999)
     )
   )
+)
+
+(define-private (update-author-reputation (author principal) (rating uint))
+  (let ((current-rep (default-to { total-score: u0, story-count: u0, reputation-score: u0 } 
+                                   (map-get? author-reputation author))))
+    (let ((new-total-score (+ (get total-score current-rep) rating))
+          (new-story-count (+ (get story-count current-rep) u1))
+          (new-reputation-score (/ (* new-total-score u100) new-story-count)))
+      (map-set author-reputation author {
+        total-score: new-total-score,
+        story-count: new-story-count,
+        reputation-score: new-reputation-score
+      })
+      true
+    )
+  )
+)
+
+(define-private (has-user-rated (story-id uint) (user principal))
+  (is-some (map-get? story-ratings { story-id: story-id, rater: user }))
 )
 
 (define-public (initialize)
@@ -237,6 +275,35 @@
   )
 )
 
+(define-public (rate-story (story-id uint) (rating uint))
+  (let ((story (unwrap! (map-get? stories story-id) err-not-found))
+        (story-author (get author story))
+        (current-summary (default-to { total-rating: u0, rating-count: u0, average-rating: u0 }
+                                       (map-get? story-rating-summary story-id))))
+    (asserts! (and (>= rating u1) (<= rating u5)) err-invalid-rating)
+    (asserts! (not (is-eq tx-sender story-author)) err-self-rating)
+    (asserts! (not (has-user-rated story-id tx-sender)) err-already-rated)
+    (asserts! (> (get-governance-balance tx-sender) u0) err-insufficient-tokens)
+    (map-set story-ratings { story-id: story-id, rater: tx-sender } {
+      rating: rating,
+      timestamp: stacks-block-height
+    })
+    (let ((new-total-rating (+ (get total-rating current-summary) rating))
+          (new-rating-count (+ (get rating-count current-summary) u1)))
+      (let ((new-average-rating (/ (* new-total-rating u100) new-rating-count)))
+        (map-set story-rating-summary story-id {
+          total-rating: new-total-rating,
+          rating-count: new-rating-count,
+          average-rating: new-average-rating
+        })
+        (update-author-reputation story-author rating)
+        (try! (mint-governance-tokens tx-sender u10))
+        (ok true)
+      )
+    )
+  )
+)
+
 (define-read-only (get-story (story-id uint))
   (map-get? stories story-id)
 )
@@ -257,6 +324,18 @@
   (map-get? story-contributors story-id)
 )
 
+(define-read-only (get-story-rating (story-id uint))
+  (map-get? story-rating-summary story-id)
+)
+
+(define-read-only (get-user-story-rating (story-id uint) (user principal))
+  (map-get? story-ratings { story-id: story-id, rater: user })
+)
+
+(define-read-only (get-author-reputation (author principal))
+  (map-get? author-reputation author)
+)
+
 (define-read-only (get-contract-info)
   {
     total-stories: (var-get story-id-nonce),
@@ -266,4 +345,3 @@
     proposal-threshold: (var-get min-proposal-threshold)
   }
 )
-

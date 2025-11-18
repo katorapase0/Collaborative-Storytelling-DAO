@@ -14,6 +14,7 @@
 (define-constant err-invalid-rating (err u109))
 (define-constant err-already-rated (err u110))
 (define-constant err-self-rating (err u111))
+(define-constant err-invalid-amount (err u112))
 
 (define-data-var story-id-nonce uint u0)
 (define-data-var proposal-id-nonce uint u0)
@@ -83,6 +84,11 @@
   { total-score: uint, story-count: uint, reputation-score: uint }
 )
 
+(define-map story-tips
+  uint
+  { total-tips: uint, tip-count: uint }
+)
+
 (define-private (get-governance-balance (user principal))
   (default-to u0 (map-get? user-governance-balance user))
 )
@@ -104,6 +110,16 @@
     (asserts! (>= current-balance amount) err-insufficient-tokens)
     (try! (ft-burn? governance-token amount sender))
     (set-governance-balance sender (- current-balance amount))
+    (ok true)
+  )
+)
+
+(define-private (transfer-governance-tokens (sender principal) (recipient principal) (amount uint))
+  (let ((sender-balance (get-governance-balance sender)))
+    (asserts! (>= sender-balance amount) err-insufficient-tokens)
+    (try! (ft-transfer? governance-token amount sender recipient))
+    (set-governance-balance sender (- sender-balance amount))
+    (set-governance-balance recipient (+ (get-governance-balance recipient) amount))
     (ok true)
   )
 )
@@ -304,6 +320,27 @@
   )
 )
 
+(define-public (tip-story (story-id uint) (amount uint))
+  (let ((story (unwrap! (map-get? stories story-id) err-not-found))
+        (story-author (get author story))
+        (tipper-balance (get-governance-balance tx-sender))
+        (current-summary (default-to { total-tips: u0, tip-count: u0 }
+                                       (map-get? story-tips story-id))))
+    (asserts! (> amount u0) err-invalid-amount)
+    (asserts! (>= tipper-balance amount) err-insufficient-tokens)
+    (asserts! (not (is-eq tx-sender story-author)) err-self-rating)
+    (try! (transfer-governance-tokens tx-sender story-author amount))
+    (let ((new-total-tips (+ (get total-tips current-summary) amount))
+          (new-tip-count (+ (get tip-count current-summary) u1)))
+      (map-set story-tips story-id {
+        total-tips: new-total-tips,
+        tip-count: new-tip-count
+      })
+      (ok true)
+    )
+  )
+)
+
 (define-read-only (get-story (story-id uint))
   (map-get? stories story-id)
 )
@@ -334,6 +371,10 @@
 
 (define-read-only (get-author-reputation (author principal))
   (map-get? author-reputation author)
+)
+
+(define-read-only (get-story-tips (story-id uint))
+  (map-get? story-tips story-id)
 )
 
 (define-read-only (get-contract-info)

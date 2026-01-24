@@ -15,12 +15,16 @@
 (define-constant err-already-rated (err u110))
 (define-constant err-self-rating (err u111))
 (define-constant err-invalid-amount (err u112))
+(define-constant err-already-invited (err u113))
+(define-constant err-not-invited (err u114))
+(define-constant err-invitation-expired (err u115))
 
 (define-data-var story-id-nonce uint u0)
 (define-data-var proposal-id-nonce uint u0)
 (define-data-var nft-id-nonce uint u0)
 (define-data-var min-proposal-threshold uint u1000000)
 (define-data-var voting-period uint u1440)
+(define-data-var invitation-validity uint u720)
 
 (define-map stories
   uint
@@ -87,6 +91,16 @@
 (define-map story-tips
   uint
   { total-tips: uint, tip-count: uint }
+)
+
+(define-map collaboration-invitations
+  { story-id: uint, invitee: principal }
+  { inviter: principal, created-at: uint, accepted: bool }
+)
+
+(define-map story-collaborators
+  uint
+  (list 10 principal)
 )
 
 (define-private (get-governance-balance (user principal))
@@ -162,6 +176,26 @@
 
 (define-private (has-user-rated (story-id uint) (user principal))
   (is-some (map-get? story-ratings { story-id: story-id, rater: user }))
+)
+
+(define-private (is-story-author-or-collaborator (story-id uint) (user principal))
+  (let ((story (map-get? stories story-id)))
+    (match story
+      s (or 
+          (is-eq user (get author s))
+          (is-some (index-of (default-to (list) (map-get? story-collaborators story-id)) user)))
+      false
+    )
+  )
+)
+
+(define-private (add-collaborator-to-story (story-id uint) (collaborator principal))
+  (let ((current-collaborators (default-to (list) (map-get? story-collaborators story-id))))
+    (match (as-max-len? (append current-collaborators collaborator) u10)
+      some-list (begin (map-set story-collaborators story-id some-list) (ok true))
+      (err u999)
+    )
+  )
 )
 
 (define-public (initialize)
@@ -375,6 +409,55 @@
 
 (define-read-only (get-story-tips (story-id uint))
   (map-get? story-tips story-id)
+)
+
+(define-public (invite-collaborator (story-id uint) (invitee principal))
+  (let ((story (unwrap! (map-get? stories story-id) err-not-found)))
+    (asserts! (is-eq tx-sender (get author story)) err-unauthorized)
+    (asserts! (not (is-eq tx-sender invitee)) err-self-rating)
+    (asserts! (is-none (map-get? collaboration-invitations { story-id: story-id, invitee: invitee })) err-already-invited)
+    (map-set collaboration-invitations { story-id: story-id, invitee: invitee } {
+      inviter: tx-sender,
+      created-at: stacks-block-height,
+      accepted: false
+    })
+    (ok true)
+  )
+)
+
+(define-public (accept-collaboration (story-id uint))
+  (let ((invitation (unwrap! (map-get? collaboration-invitations { story-id: story-id, invitee: tx-sender }) err-not-invited)))
+    (asserts! (not (get accepted invitation)) err-already-invited)
+    (asserts! (<= (- stacks-block-height (get created-at invitation)) (var-get invitation-validity)) err-invitation-expired)
+    (map-set collaboration-invitations { story-id: story-id, invitee: tx-sender } 
+      (merge invitation { accepted: true }))
+    (try! (add-collaborator-to-story story-id tx-sender))
+    (try! (add-story-contributor story-id tx-sender))
+    (try! (mint-governance-tokens tx-sender u50))
+    (ok true)
+  )
+)
+
+(define-public (revoke-invitation (story-id uint) (invitee principal))
+  (let ((story (unwrap! (map-get? stories story-id) err-not-found))
+        (invitation (unwrap! (map-get? collaboration-invitations { story-id: story-id, invitee: invitee }) err-not-invited)))
+    (asserts! (is-eq tx-sender (get author story)) err-unauthorized)
+    (asserts! (not (get accepted invitation)) err-already-invited)
+    (map-delete collaboration-invitations { story-id: story-id, invitee: invitee })
+    (ok true)
+  )
+)
+
+(define-read-only (get-collaboration-invitation (story-id uint) (invitee principal))
+  (map-get? collaboration-invitations { story-id: story-id, invitee: invitee })
+)
+
+(define-read-only (get-story-collaborators (story-id uint))
+  (map-get? story-collaborators story-id)
+)
+
+(define-read-only (is-collaborator (story-id uint) (user principal))
+  (is-story-author-or-collaborator story-id user)
 )
 
 (define-read-only (get-contract-info)

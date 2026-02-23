@@ -18,6 +18,10 @@
 (define-constant err-already-invited (err u113))
 (define-constant err-not-invited (err u114))
 (define-constant err-invitation-expired (err u115))
+(define-constant err-bounty-not-found (err u116))
+(define-constant err-bounty-claimed (err u117))
+(define-constant err-bounty-expired (err u118))
+(define-constant err-bounty-not-expired (err u119))
 
 (define-data-var story-id-nonce uint u0)
 (define-data-var proposal-id-nonce uint u0)
@@ -25,6 +29,8 @@
 (define-data-var min-proposal-threshold uint u1000000)
 (define-data-var voting-period uint u1440)
 (define-data-var invitation-validity uint u720)
+(define-data-var bounty-id-nonce uint u0)
+(define-data-var bounty-duration uint u4320)
 
 (define-map stories
   uint
@@ -101,6 +107,20 @@
 (define-map story-collaborators
   uint
   (list 10 principal)
+)
+
+(define-map bounties
+  uint
+  {
+    creator: principal,
+    reward: uint,
+    description: (string-utf8 500),
+    parent-story-id: (optional uint),
+    created-at: uint,
+    deadline: uint,
+    claimed: bool,
+    claimed-story-id: (optional uint)
+  }
 )
 
 (define-private (get-governance-balance (user principal))
@@ -460,12 +480,69 @@
   (is-story-author-or-collaborator story-id user)
 )
 
+(define-public (create-bounty (reward uint) (description (string-utf8 500)) (parent-story-id (optional uint)))
+  (let ((new-bounty-id (+ (var-get bounty-id-nonce) u1))
+        (creator-balance (get-governance-balance tx-sender)))
+    (asserts! (> reward u0) err-invalid-amount)
+    (asserts! (>= creator-balance reward) err-insufficient-tokens)
+    (match parent-story-id
+      some-parent (asserts! (is-some (map-get? stories some-parent)) err-not-found)
+      true
+    )
+    (try! (burn-governance-tokens tx-sender reward))
+    (map-set bounties new-bounty-id {
+      creator: tx-sender,
+      reward: reward,
+      description: description,
+      parent-story-id: parent-story-id,
+      created-at: stacks-block-height,
+      deadline: (+ stacks-block-height (var-get bounty-duration)),
+      claimed: false,
+      claimed-story-id: none
+    })
+    (var-set bounty-id-nonce new-bounty-id)
+    (ok new-bounty-id)
+  )
+)
+
+(define-public (claim-bounty (bounty-id uint) (story-id uint))
+  (let ((bounty (unwrap! (map-get? bounties bounty-id) err-bounty-not-found))
+        (story (unwrap! (map-get? stories story-id) err-not-found)))
+    (asserts! (not (get claimed bounty)) err-bounty-claimed)
+    (asserts! (<= stacks-block-height (get deadline bounty)) err-bounty-expired)
+    (asserts! (is-eq tx-sender (get author story)) err-unauthorized)
+    (asserts! (not (is-eq tx-sender (get creator bounty))) err-self-rating)
+    (map-set bounties bounty-id (merge bounty {
+      claimed: true,
+      claimed-story-id: (some story-id)
+    }))
+    (try! (mint-governance-tokens tx-sender (get reward bounty)))
+    (ok true)
+  )
+)
+
+(define-public (cancel-bounty (bounty-id uint))
+  (let ((bounty (unwrap! (map-get? bounties bounty-id) err-bounty-not-found)))
+    (asserts! (is-eq tx-sender (get creator bounty)) err-unauthorized)
+    (asserts! (not (get claimed bounty)) err-bounty-claimed)
+    (asserts! (> stacks-block-height (get deadline bounty)) err-bounty-not-expired)
+    (try! (mint-governance-tokens tx-sender (get reward bounty)))
+    (map-delete bounties bounty-id)
+    (ok true)
+  )
+)
+
+(define-read-only (get-bounty (bounty-id uint))
+  (map-get? bounties bounty-id)
+)
+
 (define-read-only (get-contract-info)
   {
     total-stories: (var-get story-id-nonce),
     total-proposals: (var-get proposal-id-nonce),
     total-nfts: (var-get nft-id-nonce),
     voting-period: (var-get voting-period),
-    proposal-threshold: (var-get min-proposal-threshold)
+    proposal-threshold: (var-get min-proposal-threshold),
+    total-bounties: (var-get bounty-id-nonce)
   }
 )
